@@ -1,0 +1,44 @@
+name: OCI ARM Retry
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # every 5 minutes
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install OCI SDK
+        run: pip install oci
+      
+      - name: Try to create ARM instance
+        id: create
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: python retry.py
+
+      - name: Create Issue on Success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🎉 ARM Instance Created!',
+              body: `Instance created at ${new Date().toISOString()}\n\nCheck Oracle Cloud Console for details.\n\nSSH: ssh ubuntu@<PUBLIC_IP> -i ~/.oci/crawl_server_key`
+            });
+            
+            // Disable this workflow after success
+            await github.rest.actions.disableWorkflow({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'retry.yml'
+            });
