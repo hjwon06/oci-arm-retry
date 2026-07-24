@@ -137,6 +137,12 @@ def launch_instance(compute_client, compartment_id, subnet_id):
         if "capacity" in str(e.message).lower():
             log(f"Out of capacity — will retry next run")
             return None
+        elif e.status == 429:
+            log(f"Rate limited (429) — will retry next run")
+            return None
+        elif e.status in (401, 500, 502, 503):
+            log(f"Transient error ({e.status}) — will retry next run")
+            return None
         else:
             log(f"API Error: {e.status} — {e.message}")
             raise
