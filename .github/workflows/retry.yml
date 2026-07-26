@@ -1,23 +1,29 @@
 name: OCI ARM Retry
 
-# Budget: GitHub Free = 2000 min/month on private repos.
-# 3 runs/day x 18 min = 54 min/day = ~1620 min/month. Leaves headroom.
+# Public repo = unlimited free Actions minutes.
+# 4 runs/day x 350 min = ~23.3h of coverage. Job hard limit is 6h.
 on:
   schedule:
-    - cron: '0 18 * * *'   # 03:00 KST
-    - cron: '0 2 * * *'    # 11:00 KST
-    - cron: '0 10 * * *'   # 19:00 KST
+    - cron: '0 0 * * *'
+    - cron: '0 6 * * *'
+    - cron: '0 12 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
       loop_minutes:
         description: 'Minutes to keep retrying'
         required: false
-        default: '18'
+        default: '350'
+
+# Never run two loops at once (they would race and burn OCI rate limit).
+concurrency:
+  group: oci-arm-retry
+  cancel-in-progress: false
 
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -32,8 +38,8 @@ jobs:
         id: create
         env:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
-          LOOP_MINUTES: ${{ github.event.inputs.loop_minutes || '18' }}
-          INTERVAL_SEC: '30'
+          LOOP_MINUTES: ${{ github.event.inputs.loop_minutes || '350' }}
+          INTERVAL_SEC: '60'
         run: python retry.py
 
       - name: Notify on success
