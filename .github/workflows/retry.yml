@@ -1,42 +1,63 @@
 name: OCI ARM Retry
 
+# Budget: GitHub Free = 2000 min/month on private repos.
+# 3 runs/day x 18 min = 54 min/day = ~1620 min/month. Leaves headroom.
 on:
   schedule:
-    - cron: '*/5 * * * *'  # every 5 minutes
-  workflow_dispatch:  # manual trigger
+    - cron: '0 18 * * *'   # 03:00 KST
+    - cron: '0 2 * * *'    # 11:00 KST
+    - cron: '0 10 * * *'   # 19:00 KST
+  workflow_dispatch:
+    inputs:
+      loop_minutes:
+        description: 'Minutes to keep retrying'
+        required: false
+        default: '18'
 
 jobs:
   retry:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install OCI SDK
         run: pip install oci
-      
-      - name: Try to create ARM instance
+
+      - name: Retry loop
         id: create
         env:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          LOOP_MINUTES: ${{ github.event.inputs.loop_minutes || '18' }}
+          INTERVAL_SEC: '30'
         run: python retry.py
 
-      - name: Create Issue on Success
-        if: success()
+      - name: Notify on success
+        if: steps.create.outputs.instance_created == 'true'
         uses: actions/github-script@v7
         with:
           script: |
+            const ip = '${{ steps.create.outputs.public_ip }}';
+            const id = '${{ steps.create.outputs.instance_id }}';
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '🎉 ARM Instance Created!',
-              body: `Instance created at ${new Date().toISOString()}\n\nCheck Oracle Cloud Console for details.\n\nSSH: ssh ubuntu@<PUBLIC_IP> -i ~/.oci/crawl_server_key`
+              title: 'ARM instance created — crawl-server is up',
+              body: [
+                `Created at ${new Date().toISOString()}`,
+                '',
+                `Instance: \`${id}\``,
+                `Public IP: \`${ip || '(pending — check console)'}\``,
+                '',
+                '```',
+                `ssh ubuntu@${ip || '<PUBLIC_IP>'} -i ~/.oci/crawl_server_key`,
+                '```'
+              ].join('\n')
             });
-            
-            // Disable this workflow after success
             await github.rest.actions.disableWorkflow({
               owner: context.repo.owner,
               repo: context.repo.repo,

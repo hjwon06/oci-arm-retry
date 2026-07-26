@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""OCI ARM Instance Auto-Retry for GitHub Actions — single attempt per run."""
-import oci, os, sys, json, tempfile
+"""OCI ARM Instance Auto-Retry for GitHub Actions — loops within one job run."""
+import oci, os, sys, json, tempfile, time
 from datetime import datetime
+
+# Loop config (budget-aware: keeps us inside GitHub Free 2000 min/month)
+LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "18"))
+INTERVAL_SEC = int(os.environ.get("INTERVAL_SEC", "30"))
 
 DISPLAY_NAME = "crawl-server"
 SHAPE = "VM.Standard.A1.Flex"
@@ -147,40 +151,68 @@ def launch_instance(compute_client, compartment_id, subnet_id):
             log(f"API Error: {e.status} — {e.message}")
             raise
 
+def set_output(key, value):
+    """Write to GITHUB_OUTPUT (set-output is deprecated)."""
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a") as f:
+            f.write(f"{key}={value}\n")
+
+def report_success(compute, vn, compartment_id, instance):
+    """Log details and expose outputs for the workflow."""
+    set_output("instance_created", "true")
+    set_output("instance_id", instance.id)
+    ip = ""
+    try:
+        time.sleep(25)  # let the VNIC attach
+        vas = compute.list_vnic_attachments(compartment_id, instance_id=instance.id).data
+        if vas:
+            ip = vn.get_vnic(vas[0].vnic_id).data.public_ip or ""
+            log(f"Public IP: {ip}")
+    except Exception as e:
+        log(f"Could not get IP yet: {e}")
+    set_output("public_ip", ip)
+
 def main():
     log("=== OCI ARM Retry (GitHub Actions) ===")
+    log(f"Loop: {LOOP_MINUTES} min, interval {INTERVAL_SEC}s")
     config = get_oci_config()
     compartment_id = config["tenancy"]
-    
+
     compute = oci.core.ComputeClient(config)
     vn = oci.core.VirtualNetworkClient(config)
-    
-    # Check if instance already exists
-    instances = compute.list_instances(compartment_id).data
-    for inst in instances:
+
+    # Already running? Nothing to do.
+    for inst in compute.list_instances(compartment_id).data:
         if inst.display_name == DISPLAY_NAME and inst.lifecycle_state in ("RUNNING", "PROVISIONING", "STARTING"):
             log(f"Instance already exists: {inst.id} ({inst.lifecycle_state})")
-            print("::set-output name=instance_created::true")
+            set_output("instance_created", "true")
+            set_output("instance_id", inst.id)
             return
-    
+
     subnet_id = setup_networking(vn, compartment_id)
-    instance = launch_instance(compute, compartment_id, subnet_id)
-    
-    if instance:
-        print("::set-output name=instance_created::true")
-        # Get public IP
+
+    deadline = time.time() + LOOP_MINUTES * 60
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        log(f"--- Attempt #{attempt} ---")
         try:
-            vnic_attachments = compute.list_vnic_attachments(compartment_id, instance_id=instance.id).data
-            if vnic_attachments:
-                import time
-                time.sleep(30)  # wait for VNIC
-                vnic = vn.get_vnic(vnic_attachments[0].vnic_id).data
-                log(f"Public IP: {vnic.public_ip}")
+            instance = launch_instance(compute, compartment_id, subnet_id)
         except Exception as e:
-            log(f"Could not get IP yet: {e}")
-    else:
-        print("::set-output name=instance_created::false")
-        sys.exit(1)
+            log(f"Unexpected error: {e}")
+            instance = None
+        if instance:
+            log(f"Total attempts this run: {attempt}")
+            report_success(compute, vn, compartment_id, instance)
+            return
+        if time.time() + INTERVAL_SEC >= deadline:
+            break
+        time.sleep(INTERVAL_SEC)
+
+    log(f"Budget exhausted after {attempt} attempts — no capacity this run")
+    set_output("instance_created", "false")
+    # exit 0: out-of-capacity is expected, not a workflow failure
 
 if __name__ == "__main__":
     main()
