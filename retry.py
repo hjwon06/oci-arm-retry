@@ -112,12 +112,24 @@ def setup_networking(vn_client, compartment_id):
     log(f"Created Subnet: {subnet.id}")
     return subnet.id
 
-def launch_instance(compute_client, compartment_id, subnet_id):
-    """Single attempt to launch ARM instance."""
+def get_fault_domains(identity_client, compartment_id):
+    """List fault domains in the AD — capacity differs per FD."""
+    try:
+        fds = identity_client.list_fault_domains(compartment_id, AD_NAME).data
+        names = [f.name for f in fds]
+        log(f"Fault domains: {names}")
+        return names
+    except Exception as e:
+        log(f"FD list failed ({e}) — falling back to unspecified FD")
+        return [None]
+
+def launch_instance(compute_client, compartment_id, subnet_id, fault_domain=None):
+    """Single attempt to launch ARM instance in a specific fault domain."""
     try:
         details = oci.core.models.LaunchInstanceDetails(
             compartment_id=compartment_id,
             availability_domain=AD_NAME,
+            fault_domain=fault_domain,
             display_name=DISPLAY_NAME,
             shape=SHAPE,
             shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
@@ -191,14 +203,17 @@ def main():
             return
 
     subnet_id = setup_networking(vn, compartment_id)
+    identity = oci.identity.IdentityClient(config)
+    fds = get_fault_domains(identity, compartment_id)
 
     deadline = time.time() + LOOP_MINUTES * 60
     attempt = 0
     while time.time() < deadline:
         attempt += 1
-        log(f"--- Attempt #{attempt} ---")
+        fd = fds[(attempt - 1) % len(fds)]
+        log(f"--- Attempt #{attempt} (FD: {fd or 'unspecified'}) ---")
         try:
-            instance = launch_instance(compute, compartment_id, subnet_id)
+            instance = launch_instance(compute, compartment_id, subnet_id, fd)
         except Exception as e:
             log(f"Unexpected error: {e}")
             instance = None
